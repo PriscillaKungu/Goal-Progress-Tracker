@@ -12,7 +12,7 @@ Two views, chosen from the sidebar:
 
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
 
 from database import init_db, add_entry, get_all_entries, GOALS
 from calendar_sync import fetch_today_events
@@ -24,7 +24,7 @@ init_db()
 
 st.title("Year-end goal progress tracker")
 
-page = st.sidebar.radio("View", ["Quick log (from calendar)", "Log progress", "Dashboard"])
+page = st.sidebar.radio("View", ["Quick log (from calendar)", "Log progress", "Dashboard", "Summaries"])
 
 # ----------------------------------------------------------------
 # PAGE 0: QUICK LOG FROM CALENDAR
@@ -124,7 +124,7 @@ elif page == "Log progress":
 # ----------------------------------------------------------------
 # PAGE 2: DASHBOARD
 # ----------------------------------------------------------------
-else:
+elif page == "Dashboard":
     st.subheader("Progress overview")
 
     entries = get_all_entries()
@@ -177,3 +177,79 @@ else:
             else:
                 break
         st.markdown(f"**Current daily logging streak:** {streak} day(s)")
+
+# ----------------------------------------------------------------
+# PAGE 3: SUMMARIES (day / week / month rollups + notes)
+# ----------------------------------------------------------------
+else:
+    st.subheader("Progress summaries")
+
+    entries = get_all_entries()
+    if not entries:
+        st.info("No data yet. Log a few entries first, then come back here.")
+    else:
+        df = pd.DataFrame(entries)
+        df["log_date"] = pd.to_datetime(df["log_date"]).dt.date
+
+        period = st.radio("Period", ["Today", "This week", "This month", "Custom range"], horizontal=True)
+
+        today = date.today()
+        if period == "Today":
+            start = end = today
+            label = today.strftime("%A, %B %d, %Y")
+        elif period == "This week":
+            start = today - timedelta(days=today.weekday())  # Monday
+            end = start + timedelta(days=6)
+            label = f"{start.strftime('%b %d, %Y')} - {end.strftime('%b %d, %Y')}"
+        elif period == "This month":
+            start = today.replace(day=1)
+            next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            end = next_month - timedelta(days=1)
+            label = f"{start.strftime('%b %d')} - {end.strftime('%b %d, %Y')}"
+        else:
+            col_a, col_b = st.columns(2)
+            start = col_a.date_input("From", value=today - timedelta(days=7))
+            end = col_b.date_input("To", value=today)
+            if start > end:
+                st.error("'From' date must be before 'To' date.")
+                st.stop()
+            label = f"{start.strftime('%b %d, %Y')} - {end.strftime('%b %d, %Y')}"
+
+        st.caption(label)
+
+        period_df = df[(df["log_date"] >= start) & (df["log_date"] <= end)]
+
+        if period_df.empty:
+            st.info("Nothing logged in this period yet.")
+        else:
+            # --- Totals ---
+            total_hours = round(period_df["hours_spent"].sum(), 1)
+            done_count = (period_df["status"] == "done").sum()
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total hours", total_hours)
+            col2.metric("Tasks done", done_count)
+            col3.metric("Entries logged", len(period_df))
+
+            st.divider()
+
+            # --- Hours per goal for this period ---
+            st.markdown("**Hours by goal**")
+            hours_by_goal = (
+                period_df.groupby("goal")["hours_spent"].sum().sort_values(ascending=False)
+            )
+            st.bar_chart(hours_by_goal)
+
+            st.divider()
+
+            # --- Notes, grouped by goal, most recent first ---
+            st.markdown("**Notes from this period**")
+            notes_df = period_df[period_df["notes"].astype(str).str.strip() != ""]
+            if notes_df.empty:
+                st.caption("No notes recorded this period.")
+            else:
+                for goal, group in notes_df.groupby("goal"):
+                    group_hours = round(group["hours_spent"].sum(), 1)
+                    with st.expander(f"{goal} - {group_hours}h logged ({len(group)} entries)"):
+                        for _, row in group.sort_values("log_date", ascending=False).iterrows():
+                            st.markdown(f"**{row['log_date'].strftime('%a %b %d, %Y')}** - {row['task']}")
+                            st.caption(f"{row['status']} · {row['hours_spent']}h · {row['notes']}")
